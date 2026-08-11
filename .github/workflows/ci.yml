@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    # Guard 1 against a gitops-commit loop: the tag-bump commit only touches
+    # deploy/**, so it never retriggers this workflow.
+    paths-ignore:
+      - "deploy/**"
+      - "monitoring/**"
+      - "**.md"
+  pull_request:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  IMAGE: ghcr.io/angelosha/devops-lab
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check app
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r app/requirements.txt -r app/requirements-dev.txt
+      - run: pytest app/tests -v
+
+  build-push:
+    needs: [lint, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: app
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+
+  gitops-commit:
+    needs: build-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin new image tag in prod overlay
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          cd deploy/overlays/prod
+          "${GITHUB_WORKSPACE}/kustomize" edit set image ${IMAGE}=${IMAGE}:${{ github.sha }}
+          git config user.name "ci-bot"
+          git config user.email "angeloshaheen@gmail.com"
+          if git diff --quiet; then
+            echo "overlay already pins ${GITHUB_SHA} — nothing to commit"
+          else
+            # Guard 2: [skip ci]. Guard 3: GITHUB_TOKEN pushes never trigger workflows.
+            git commit -am "ci: deploy ${GITHUB_SHA::7} [skip ci]"
+            git push
+          fi
