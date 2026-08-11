@@ -168,15 +168,14 @@ alertmanager:
 
 prometheusOperator:
   admissionWebhooks:
-    # The cert-generation job pulls from ghcr.io, which containerd on this node
-    # is currently refused by (403 on the token endpoint). The webhook only
-    # validates PrometheusRule resources before admission, so a single-user lab
-    # loses nothing by skipping it. Re-enable once the ghcr.io block is fixed.
-    enabled: false
+    # Validates PrometheusRule resources at admission, so a malformed rule is
+    # rejected instead of being accepted and silently failing to load.
+    # Its cert-generation job pulls from ghcr.io, which was blocked on this node
+    # by a stale credential in /root/.docker/config.json until `docker logout
+    # ghcr.io` cleared it.
+    enabled: true
   tls:
-    # Must be disabled alongside the webhooks: the operator otherwise mounts the
-    # TLS secret that the (now absent) cert-generation job would have created.
-    enabled: false
+    enabled: true
 
 grafana:
   resources:

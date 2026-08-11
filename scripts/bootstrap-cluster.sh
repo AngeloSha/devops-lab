@@ -58,8 +58,16 @@ curl -s -H 'Host: devops-lab.servershelf.com' --max-time 10 http://127.0.0.1:300
 
 hr "Phase 6 — Argo CD"
 kubectl get ns argocd >/dev/null 2>&1 || kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# --server-side is required: the ApplicationSet CRD exceeds the 262144-byte limit
+# on the last-applied-configuration annotation that client-side apply writes.
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml \
+  --server-side --force-conflicts
 kubectl -n argocd rollout status deploy/argocd-server --timeout=300s
+
+# Dex only provides SSO, which this lab does not use — and its image lives on
+# ghcr.io, which containerd on this host cannot currently reach. Local admin
+# login works without it.
+kubectl -n argocd scale deploy/argocd-dex-server --replicas=0
 
 # TLS terminates at Nginx Proxy Manager, so the server itself speaks plain HTTP.
 kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{"data":{"server.insecure":"true"}}'
