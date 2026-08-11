@@ -1,7 +1,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ../../base
+- ../../base
 images:
-  - name: ghcr.io/angelosha/devops-lab
-    newTag: latest # CI rewrites this to the git sha on every deploy
+- name: ghcr.io/angelosha/devops-lab
+  newName: ghcr.io/angelosha/devops-lab
+  newTag: a9e11421e676a684faec7098d982f2c29d5a5e17
