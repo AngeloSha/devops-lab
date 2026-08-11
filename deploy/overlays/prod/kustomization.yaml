@@ -5,4 +5,4 @@ resources:
 images:
 - name: ghcr.io/angelosha/devops-lab
   newName: ghcr.io/angelosha/devops-lab
-  newTag: ab1497b89b781db42c20737360f3b3b00fff8902
+  newTag: d7d3fda7a5d071ae5f8d22a0cbd824540c49453f
