@@ -1,0 +1,74 @@
+# heimdall (home.servershelf.com) — staged for migration, NOT yet running.
+#
+# replicas: 0 on purpose. Heimdall keeps its state in /config/www/app.sqlite, and
+# this Deployment hostPath-mounts the same directory the Docker container uses.
+# Two processes writing one SQLite file corrupts it, so unlike koryomi this cannot
+# run in parallel with the Docker container.
+#
+# Cutover (about 30 seconds of downtime on a dashboard):
+#   docker stop heimdall
+#   kubectl -n sites scale deploy/heimdall --replicas=1
+#   kubectl -n sites rollout status deploy/heimdall
+#   curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: home.servershelf.com' http://127.0.0.1:30080/
+#   then repoint the NPM proxy host: home.servershelf.com -> 172.19.0.1:30080
+#
+# Rollback: scale back to 0, `docker start heimdall`, point NPM at `heimdall` again.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: heimdall
+  labels:
+    app: heimdall
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: heimdall
+  strategy:
+    # Never let a new pod start before the old one is gone — same SQLite file.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: heimdall
+    spec:
+      containers:
+        - name: heimdall
+          image: lscr.io/linuxserver/heimdall:latest
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: Europe/Berlin
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          hostPath:
+            path: /opt/containers/heimdall/config
+            type: Directory

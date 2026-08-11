@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: heimdall
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: home.servershelf.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: heimdall
+                port:
+                  name: http

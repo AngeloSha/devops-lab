@@ -1,0 +1,26 @@
+# Migrated Docker Compose sites, managed by Argo CD.
+#
+# selfHeal is deliberately OFF here, unlike the devops-lab app. These are real
+# sites cut over from Docker, and during a cutover it is useful to be able to
+# scale a Deployment by hand without Argo immediately reverting it. Sync is still
+# automated, so a git change still deploys.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sites
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/AngeloSha/devops-lab.git
+    targetRevision: main
+    path: deploy/sites
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sites
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true

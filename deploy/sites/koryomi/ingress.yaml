@@ -1,0 +1,30 @@
+# Traefik matches on Host, so this can be deployed and tested with a Host header
+# while the Docker container still serves the real traffic. Cutover is a one-field
+# change in Nginx Proxy Manager: point koryomi.com at 172.19.0.1:30080.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: koryomi
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: koryomi.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: koryomi
+                port:
+                  name: http
+    - host: www.koryomi.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: koryomi
+                port:
+                  name: http
