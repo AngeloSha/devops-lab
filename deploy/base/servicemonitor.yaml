@@ -1,0 +1,16 @@
+# Delivered by Argo CD, not kubectl — the monitoring configuration is itself
+# under GitOps. Requires the Prometheus Operator CRDs to exist first.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: devops-lab
+  labels:
+    app: devops-lab
+spec:
+  selector:
+    matchLabels:
+      app: devops-lab
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

@@ -26,6 +26,18 @@ prometheus:
 alertmanager:
   enabled: false # future round: flip to true and add routes/receivers
 
+prometheusOperator:
+  admissionWebhooks:
+    # The cert-generation job pulls from ghcr.io, which containerd on this node
+    # is currently refused by (403 on the token endpoint). The webhook only
+    # validates PrometheusRule resources before admission, so a single-user lab
+    # loses nothing by skipping it. Re-enable once the ghcr.io block is fixed.
+    enabled: false
+  tls:
+    # Must be disabled alongside the webhooks: the operator otherwise mounts the
+    # TLS secret that the (now absent) cert-generation job would have created.
+    enabled: false
+
 grafana:
   resources:
     requests:
