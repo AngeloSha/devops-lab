@@ -1,0 +1,134 @@
+# cAdvisor — per-container CPU/memory/network/restart metrics for the ~139
+# Docker containers running on this host alongside K3s.
+#
+# Deployed as a Kubernetes DaemonSet rather than a Docker container on purpose:
+# sec-stack-watchtower sweeps every container on this host at 04:00 nightly with
+# no scope or label filter, and would restart and drift anything added to Docker.
+# It also means no new Docker network is created — the default address pools on
+# this host are fully exhausted.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cadvisor
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: cadvisor
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cadvisor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cadvisor
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: cadvisor
+          image: gcr.io/cadvisor/cadvisor:v0.55.1
+          args:
+            # Without this, cAdvisor reports every K3s pod as well — which the
+            # kubelet already exports on /metrics/cadvisor — and everything is
+            # counted twice.
+            - --docker_only=true
+            - --housekeeping_interval=30s
+            - --max_housekeeping_interval=35s
+            - --allow_dynamic_housekeeping=true
+            # Container labels would add a label per compose key to every series.
+            # Keep just the project name, which is what makes the data groupable.
+            - --store_container_labels=false
+            - --whitelisted_container_labels=com.docker.compose.project
+            - --disable_metrics=percpu,sched,tcp,udp,advtcp,process,hugetlb,referenced_memory,cpu_topology,resctrl
+            - --event_storage_event_limit=default=0
+            - --event_storage_age_limit=default=0
+            - --docker=unix:///var/run/docker.sock
+            - --port=8080
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 192Mi
+          securityContext:
+            # Upstream's own DaemonSet uses privileged. On Ubuntu 24.04 with
+            # cgroup v2 an unprivileged cAdvisor commonly reports empty metrics,
+            # which is worse than an honest privilege grant. Ten containers on
+            # this host already mount docker.sock, so this adds no new class of
+            # access.
+            privileged: true
+          volumeMounts:
+            - { name: rootfs, mountPath: /rootfs, readOnly: true }
+            - { name: var-run, mountPath: /var/run, readOnly: true }
+            - { name: sys, mountPath: /sys, readOnly: true }
+            - { name: docker, mountPath: /var/lib/docker, readOnly: true }
+            - { name: disk, mountPath: /dev/disk, readOnly: true }
+      volumes:
+        - { name: rootfs, hostPath: { path: / } }
+        - { name: var-run, hostPath: { path: /var/run } }
+        - { name: sys, hostPath: { path: /sys } }
+        - { name: docker, hostPath: { path: /var/lib/docker } }
+        - { name: disk, hostPath: { path: /dev/disk } }
+      tolerations:
+        - operator: Exists
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cadvisor
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: cadvisor
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: cadvisor
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cadvisor
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cadvisor
+  endpoints:
+    - port: http
+      # 60s rather than 30s: 139 containers is a lot of parsing on a host that
+      # already runs at load ~10. Restart detection uses changes() over an hour,
+      # so the longer interval costs nothing.
+      interval: 60s
+      scrapeTimeout: 20s
+      metricRelabelings:
+        # The root cgroup.
+        - action: drop
+          sourceLabels: [name]
+          regex: '^$'
+        # Defensive: a container reported by raw 64-hex ID is a containerd
+        # container, which means --docker_only stopped working. The kubelet
+        # already exports those on /metrics/cadvisor, so letting them in here
+        # would double-count every K3s pod. Currently a no-op — verified that
+        # job=cadvisor reports exactly the 139 Docker containers and job=kubelet
+        # separately reports the 37 K3s ones.
+        - action: drop
+          sourceLabels: [name]
+          regex: '[a-f0-9]{64}'
+        # Hard keep-list — cAdvisor emits far more than is worth storing.
+        - action: keep
+          sourceLabels: [__name__]
+          regex: 'container_(cpu_usage_seconds_total|memory_(working_set_bytes|usage_bytes|rss|cache)|network_(receive|transmit)_(bytes|errors)_total|fs_(usage|limit)_bytes|last_seen|start_time_seconds|spec_(memory_limit_bytes|cpu_quota))|machine_(cpu_cores|memory_bytes)'
+        # The full cgroup path duplicates `name` and costs index memory.
+        - action: labeldrop
+          regex: 'id'

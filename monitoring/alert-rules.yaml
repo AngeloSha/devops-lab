@@ -1,0 +1,189 @@
+# Alert rules for the host, the Docker estate and public uptime.
+#
+# Deliberately few. Every threshold below was checked against a live reading so
+# that nothing fires on day one — an alert that is already firing when you
+# install it teaches you to ignore the pager.
+#
+# MUST carry `release: kps` — ruleSelector is matchLabels{release: kps}.
+# The admission webhook is disabled on this cluster, so a malformed rule is
+# accepted and then silently fails to load. Validate with promtool before apply.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: uptime
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: uptime
+      rules:
+        - alert: PublicSiteDown
+          expr: probe_success{probe_group="public"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.instance }} is down"
+            description: "Blackbox probe failed for 5 minutes. 502/503/504 or a failed TLS handshake; a 3xx or 401 would still count as up."
+
+        - alert: InternalServiceDown
+          # 15m, not 5m: these restart routinely during updates and a shorter
+          # window would page for ordinary maintenance.
+          expr: probe_success{probe_group="internal"} == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.instance }} is down"
+
+        - alert: KnownBrokenServiceStillDown
+          # info severity is routed to the null receiver — visible in the UI,
+          # never emailed. Here so recovery is obvious.
+          expr: probe_success{probe_group="known_broken"} == 0
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: "{{ $labels.instance }} is still down (known broken)"
+
+        - alert: CertExpiringSoon
+          # Soonest cert today is 25 days out, so this is quiet on install.
+          expr: (probe_ssl_earliest_cert_expiry{probe_group=~"public|internal"} - time()) / 86400 < 14
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: '{{ $labels.instance }} certificate expires in {{ $value | printf "%.0f" }} days'
+
+        - alert: CertExpiringCritical
+          expr: (probe_ssl_earliest_cert_expiry{probe_group=~"public|internal"} - time()) / 86400 < 3
+          for: 1h
+          labels:
+            severity: critical
+          annotations:
+            summary: '{{ $labels.instance }} certificate expires in {{ $value | printf "%.1f" }} days'
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: docker-estate
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: docker-estate
+      rules:
+        - alert: ContainerRestartLooping
+          # cAdvisor has no restart counter for Docker containers; a change in
+          # start time is the signal.
+          expr: changes(container_start_time_seconds{job="cadvisor",name!=""}[1h]) > 3
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: '{{ $labels.name }} restarted {{ $value | printf "%.0f" }} times in the last hour'
+
+        - alert: ContainerMemoryNearLimit
+          expr: |
+            container_memory_working_set_bytes{job="cadvisor",name!=""}
+              / container_spec_memory_limit_bytes{job="cadvisor",name!=""} > 0.90
+            and container_spec_memory_limit_bytes{job="cadvisor",name!=""} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.name }} is at {{ $value | humanizePercentage }} of its memory limit"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: host-health
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: host-health
+      rules:
+        - alert: HostDiskAlmostFull
+          # / is at 92% right now, so a 90% threshold would page immediately.
+          # 95% is the genuine act-now line; HostDiskFillingUp below is what
+          # actually gives useful lead time.
+          expr: node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.05
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "/ has only {{ $value | humanizePercentage }} free"
+
+        - alert: HostDiskFillingUp
+          # for: 6h, not 1h. / sits at ~8% free, so the <15% arm is permanently
+          # true and the alert rests entirely on the slope — and any one-off
+          # write (a container image pull, a big build) tilts a 6h regression
+          # enough to predict doom. Requiring the trend to hold for six hours is
+          # what separates "something is genuinely leaking" from "we installed
+          # something this afternoon".
+          expr: |
+            predict_linear(node_filesystem_avail_bytes{mountpoint="/"}[6h], 4*24*3600) < 0
+            and node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.15
+          for: 6h
+          labels:
+            severity: warning
+          annotations:
+            summary: "/ has been on course to fill within 4 days for the last 6 hours"
+
+        - alert: HostMemoryCriticallyLow
+          expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+          for: 15m
+          labels:
+            severity: critical
+
+        - alert: HostSwapNearlyExhausted
+          expr: node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes < 0.10
+          for: 30m
+          labels:
+            severity: warning
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: monitoring-self
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: monitoring-self
+      rules:
+        - alert: MonitoringTargetDown
+          # An explicit allow-list rather than an exclusion, so it can never be
+          # tripped by a target we deliberately do not care about.
+          expr: up{job=~"blackbox-exporter|cadvisor|authentik|node-exporter"} == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "scrape target {{ $labels.job }} ({{ $labels.instance }}) is down"
+
+        - alert: PrometheusUnhealthy
+          # The head_series arm is a cardinality tripwire. Live ingestion is
+          # ~35k series, but head_series counts everything still in the head
+          # block including series that stopped being scraped, so it stays high
+          # for hours after a large cardinality change and only falls at head
+          # truncation — it read 133k right after the kubelet/apiserver trim
+          # while actual ingestion was already 35k. 200k with a 2h window
+          # therefore ignores those transitions while still catching a genuine
+          # runaway (an unbounded label goes to millions, not to 200k).
+          expr: |
+            increase(prometheus_rule_evaluation_failures_total[15m]) > 0
+            or increase(prometheus_target_scrapes_exceeded_sample_limit_total[15m]) > 0
+            or prometheus_tsdb_head_series > 200000
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Prometheus is unhealthy (rule failures, sample-limit hits, or runaway cardinality)"

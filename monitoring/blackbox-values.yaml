@@ -1,0 +1,47 @@
+# Blackbox exporter — probes every public hostname served by Nginx Proxy Manager
+# for reachability and TLS expiry. Installed as its own Helm release so it can be
+# removed with `helm uninstall blackbox` without touching the kps release.
+fullnameOverride: blackbox-exporter
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+config:
+  modules:
+    http_web:
+      prober: http
+      timeout: 8s
+      http:
+        method: GET
+        valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+        # Measured across all 46 hostnames: only 14 return 200. 25 return 3xx
+        # (mostly Authentik forward-auth redirects) and 3 return 401. The signal
+        # we actually want is "NPM reached a live backend", so a 302 to a login
+        # page is UP. 502/503/504 and connection failures are the real DOWN.
+        valid_status_codes: [200, 201, 204, 301, 302, 303, 307, 308, 401, 403]
+        # Must stay false. Following www.marlasauermann.com's 301 to the apex
+        # would make probe_ssl_earliest_cert_expiry report the APEX certificate,
+        # silently dropping the www cert from expiry alerting. Also halves the
+        # HTTP work per probe on an already-loaded host.
+        follow_redirects: false
+        # The pod network is IPv4-only, and angeloshaheen.com, shkofit.ai and
+        # www.shkofit.ai all publish AAAA records.
+        preferred_ip_protocol: ip4
+        ip_protocol_fallback: false
+        tls_config:
+          # A certificate that doesn't match the hostname is a real failure and
+          # should show up as one.
+          insecure_skip_verify: false
+
+serviceMonitor:
+  selfMonitor:
+    enabled: true
+    labels:
+      release: kps

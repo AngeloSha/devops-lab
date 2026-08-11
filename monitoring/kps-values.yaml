@@ -1,6 +1,79 @@
-# kube-prometheus-stack values, sized for a single-node K3s lab sharing a busy
-# host. Retention and resources are deliberately capped; storage lands on the
-# local-path provisioner (under /data/k3s/storage — NOT the nearly-full root fs).
+# kube-prometheus-stack values, sized for a single-node K3s lab that also monitors
+# the ~139-container Docker estate on the same host. Retention and resources are
+# deliberately capped; storage lands on the local-path provisioner.
+#
+# The largest thing in this file is the cardinality trim on kubelet/apiserver.
+# K3s runs the apiserver, scheduler, controller-manager and kubelet inside ONE
+# process sharing ONE Prometheus registry, so https://<node>:10250/metrics serves
+# the entire control-plane metric set. Scraping both `kubelet` and `apiserver`
+# therefore stores the same ~40k series twice. Measured: 115,161 head series, of
+# which kubelet was 55,764 and apiserver 37,994. The keep-lists below cut total
+# ingestion by roughly two thirds, which is what makes room for the Docker estate.
+
+# K3s runs control-plane components in-process (and uses sqlite, not etcd),
+# so their dedicated scrape targets don't exist:
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+kubelet:
+  serviceMonitor:
+    # Keep only metrics that are genuinely the kubelet's. Everything else on this
+    # endpoint (apiserver_*, etcd_*, scheduler_*, workqueue_*, go_*, process_*) is
+    # a duplicate of job=apiserver.
+    metricRelabelings:
+      - action: keep
+        sourceLabels: [__name__]
+        regex: 'kubelet_.*|volume_manager_.*|csi_operations_.*|storage_operation_.*|kubernetes_build_info|rest_client_requests_total|node_.*'
+    # The node advertises an IPv6 InternalIP, so the operator builds a second,
+    # unreachable IPv6 EndpointSlice and every kubelet scrape pool gets a
+    # permanently-dead target. Dropping it at discovery is why no alert rule below
+    # needs an "except the broken ones" clause.
+    relabelings: &kubelet-relabel
+      - action: drop
+        sourceLabels: [__address__]
+        regex: '\[.*'
+      # The chart's own KubeletDown/TargetDown rules select on
+      # metrics_path="/metrics", so this label must survive or the kubelet looks
+      # permanently absent even while it is up.
+      - action: replace
+        sourceLabels: [__metrics_path__]
+        targetLabel: metrics_path
+    cAdvisorRelabelings: *kubelet-relabel
+    probesRelabelings: *kubelet-relabel
+
+kubeApiServer:
+  serviceMonitor:
+    # ~30k of the 38k apiserver series are histogram buckets. _sum and _count
+    # survive, so rates and averages still work; only quantiles are lost. The
+    # kubeApiserver* default rule groups consume these buckets and are disabled
+    # below to match.
+    metricRelabelings:
+      - action: drop
+        sourceLabels: [__name__]
+        regex: '.*_bucket'
+
+defaultRules:
+  rules:
+    # These four consume the apiserver histogram buckets dropped above.
+    kubeApiserverAvailability: false
+    kubeApiserverBurnrate: false
+    kubeApiserverHistogram: false
+    kubeApiserverSlos: false
+    # Components that do not exist on a single-node K3s.
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    windows: false
+    network: false
+
 prometheus:
   prometheusSpec:
     retention: 2d
@@ -24,7 +97,74 @@ prometheus:
               storage: 5Gi
 
 alertmanager:
-  enabled: false # future round: flip to true and add routes/receivers
+  enabled: true
+  alertmanagerSpec:
+    replicas: 1
+    retention: 48h
+    # NOT hostNetwork: the config-reloader sidecar binds :8080, which on this
+    # host belongs to the obscura-preview site. SMTP instead goes through the
+    # socat relay in host-bridge.yaml, which reaches postfix from the host's own
+    # netns — where mailcow's isolation rule doesn't apply and 127.0.0.0/8 is
+    # already inside postfix's mynetworks.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 48Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    # No storage block: nflog and silences are a few MB, and an emptyDir avoids
+    # another PVC on a root filesystem that is already 92% full.
+  config:
+    global:
+      resolve_timeout: 5m
+      smtp_from: alerts@servershelf.com
+      # The socat relay from host-bridge.yaml. It forwards to 127.0.0.1:25 in the
+      # host netns, so postfix sees a loopback client and permits the relay with
+      # no credentials. Plain text is fine here: the traffic goes pod -> node ->
+      # loopback and never leaves the machine.
+      smtp_smarthost: 135.181.219.107:2525
+      smtp_require_tls: false
+      smtp_hello: alertmanager.servershelf.com
+    route:
+      group_by: ["alertname", "probe_group"]
+      group_wait: 60s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: email
+      routes:
+        # Watchdog is the deadman switch — it must keep firing, and must never
+        # be emailed.
+        - matchers: ['alertname = "Watchdog"']
+          receiver: "null"
+        - matchers: ['alertname = "InfoInhibitor"']
+          receiver: "null"
+        - matchers: ['severity = "info"']
+          receiver: "null"
+        # Chronic and permanent on this host: sustained load 10-12 on 12 cores
+        # from ~139 containers, and /data is a spinning disk that the media stack
+        # keeps at ~95% utilisation. These are true statements about the machine,
+        # not incidents. Kept visible in the UI, never emailed — an alert that
+        # fires forever only teaches you to ignore the pager.
+        - matchers:
+            - 'alertname =~ "NodeDiskIOSaturation|NodeSystemSaturation|CPUThrottlingHigh"'
+          receiver: "null"
+        - matchers: ['severity = "critical"']
+          receiver: email
+          group_wait: 30s
+          repeat_interval: 4h
+    inhibit_rules:
+      - source_matchers: ['severity = "critical"']
+        target_matchers: ['severity = "warning"']
+        equal: ["alertname", "instance"]
+    receivers:
+      - name: "null"
+      - name: email
+        email_configs:
+          - to: angeloshaheen@servershelf.com
+            send_resolved: true
+            headers:
+              Subject: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}{{ if .CommonLabels.instance }} — {{ .CommonLabels.instance }}{{ end }}'
 
 prometheusOperator:
   admissionWebhooks:
@@ -51,17 +191,6 @@ grafana:
     ingressClassName: traefik
     hosts:
       - grafana.servershelf.com
-
-# K3s runs control-plane components in-process (and uses sqlite, not etcd),
-# so their dedicated scrape targets don't exist:
-kubeControllerManager:
-  enabled: false
-kubeScheduler:
-  enabled: false
-kubeProxy:
-  enabled: false
-kubeEtcd:
-  enabled: false
 
 prometheus-node-exporter:
   resources:

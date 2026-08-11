@@ -1,0 +1,80 @@
+# Bridges from the cluster to things only the host can reach.
+#
+# Two separate Docker firewall behaviours make these necessary, and neither can
+# be solved from inside the cluster:
+#
+#   1. Docker sets the FORWARD policy to DROP and only accepts traffic to
+#      *published* ports, so a pod on 10.42.0.0/24 cannot reach a container IP on
+#      172.19.0.0/16 (Authentik's metrics endpoint). Verified: it times out.
+#
+#   2. mailcow installs an iptables rule ("mailcow isolation") that DROPs any TCP
+#      forwarded into its bridge from another interface, so pods cannot reach
+#      postfix on 25/465/587 either.
+#
+# The host itself can reach both, because host-originated traffic takes OUTPUT
+# rather than FORWARD. A hostNetwork pod therefore relays cleanly. This is the
+# same reason node-exporter is scraped at the node IP rather than a pod IP.
+#
+# Alertmanager deliberately does NOT run with hostNetwork itself: its
+# config-reloader sidecar binds :8080, which on the host is already taken by the
+# obscura-preview site.
+#
+# Both listeners are protected by ufw's default-deny (host ports, unlike
+# Docker-published ports, do go through it) with an explicit allow for
+# 10.42.0.0/16.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-bridge
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: host-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: host-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: host-bridge
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      containers:
+        # Authentik's Prometheus endpoint, on the proxy bridge.
+        # If Authentik is ever recreated its IP can change; refresh with
+        #   docker inspect -f '{{.NetworkSettings.Networks.proxy.IPAddress}}' authentik-server-1
+        # The MonitoringTargetDown alert is what tells you it drifted.
+        - name: authentik-metrics
+          image: alpine/socat:1.8.0.0
+          args:
+            - TCP-LISTEN:9302,fork,reuseaddr
+            - TCP:172.19.0.15:9300
+          ports:
+            - { name: authentik, containerPort: 9302, hostPort: 9302 }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          securityContext: &hardened
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+        # SMTP submission into mailcow. socat runs in the host netns, so postfix
+        # sees the connection arriving from 127.0.0.1 — already inside its
+        # mynetworks — which is why Alertmanager needs no mailbox or password.
+        - name: smtp
+          image: alpine/socat:1.8.0.0
+          args:
+            - TCP-LISTEN:2525,fork,reuseaddr
+            - TCP:127.0.0.1:25
+          ports:
+            - { name: smtp, containerPort: 2525, hostPort: 2525 }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+          securityContext: *hardened

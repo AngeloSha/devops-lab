@@ -1,0 +1,152 @@
+# Uptime + TLS-expiry probing for every hostname Nginx Proxy Manager serves.
+#
+# Split into three groups by how loudly a failure should be treated, and the
+# alert rules key off the `probe_group` label rather than naming hosts. Moving a
+# host between groups is a one-line edit here and needs no rule change.
+#
+# The 13 proxy hosts NPM has disabled are deliberately absent — probing them
+# would alert forever.
+#
+# Every Probe MUST carry `release: kps`; the operator's probeSelector is
+# matchLabels{release: kps} and silently ignores anything without it.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: blackbox-public
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-public
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_web
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    scheme: http
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - https://angeloshaheen.com
+        - https://envelopee.net
+        - https://smrtstand.com
+        - https://goblinbid.com
+        - https://koryomi.com
+        - https://wantviews.com
+        - https://marlasauermann.com
+        - https://shkofit.ai
+        - https://supabase.shkofit.ai
+        - https://www.marlasauermann.com
+        - https://www.shkofit.ai
+      labels:
+        probe_group: public
+  metricRelabelings:
+    # probe_ssl_last_chain_info carries subject/issuer/fingerprint as labels and
+    # is by far the highest-cardinality thing blackbox emits.
+    - action: drop
+      sourceLabels: [__name__]
+      regex: 'probe_(ssl_last_chain_info|tls_version_info|http_uncompressed_body_length|http_content_length)'
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: blackbox-internal
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-internal
+  interval: 60s
+  scrapeTimeout: 15s
+  module: http_web
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    scheme: http
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - https://argocd.servershelf.com
+        - https://auth.servershelf.com
+        - https://bazarr.servershelf.com
+        - https://browser.servershelf.com
+        - https://ci.servershelf.com
+        - https://cloud.servershelf.com
+        - https://code.servershelf.com
+        - https://compose-manager.servershelf.com
+        - https://devops-lab.servershelf.com
+        - https://git.servershelf.com
+        - https://grafana.servershelf.com
+        - https://guacamole.servershelf.com
+        - https://home.servershelf.com
+        - https://jellyfin.servershelf.com
+        - https://jellyseer.servershelf.com
+        - https://lab.servershelf.com
+        - https://npm.servershelf.com
+        - https://office.servershelf.com
+        - https://openclaw.servershelf.com
+        - https://portainer.servershelf.com
+        - https://pra.servershelf.com
+        - https://prowlarr.servershelf.com
+        - https://radarr.servershelf.com
+        - https://rdtclient.servershelf.com
+        - https://sonar.servershelf.com
+        - https://sonarr.servershelf.com
+        - https://stan.servershelf.com
+        - https://suwayomi.servershelf.com
+        - https://vault.servershelf.com
+        - https://yomi.servershelf.com
+        - https://ytweb.servershelf.com
+      labels:
+        probe_group: internal
+  metricRelabelings:
+    # probe_ssl_last_chain_info carries subject/issuer/fingerprint as labels and
+    # is by far the highest-cardinality thing blackbox emits.
+    - action: drop
+      sourceLabels: [__name__]
+      regex: 'probe_(ssl_last_chain_info|tls_version_info|http_uncompressed_body_length|http_content_length)'
+---
+# Known-broken today. Kept visible in Grafana so recovery is obvious, but alerted
+# only at info severity, which the Alertmanager route drops. When one starts
+# returning probe_success=1, move it up into blackbox-internal.
+#
+#   komga / lazylibrarian / lidarr  — 502, NPM host exists but no backing container
+#   www.envelopee.net               — no NPM proxy host at all; TLS falls through
+#                                     to CN=www.inviteify.net, so the handshake
+#                                     aborts and no cert metric is ever emitted
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: blackbox-known-broken
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: blackbox-known-broken
+  # 120s, not 300s: a 300s interval sits exactly on Prometheus' 5-minute lookback
+  # boundary, so these targets flicker in and out of instant queries and appear
+  # to vanish from Grafana. Only 4 targets, so the cost is negligible.
+  interval: 120s
+  scrapeTimeout: 15s
+  module: http_web
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    scheme: http
+    path: /probe
+  targets:
+    staticConfig:
+      static:
+        - https://komga.servershelf.com
+        - https://lazylibrarian.servershelf.com
+        - https://lidarr.servershelf.com
+        - https://www.envelopee.net
+      labels:
+        probe_group: known_broken
+  metricRelabelings:
+    # probe_ssl_last_chain_info carries subject/issuer/fingerprint as labels and
+    # is by far the highest-cardinality thing blackbox emits.
+    - action: drop
+      sourceLabels: [__name__]
+      regex: 'probe_(ssl_last_chain_info|tls_version_info|http_uncompressed_body_length|http_content_length)'

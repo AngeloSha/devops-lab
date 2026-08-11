@@ -1,0 +1,35 @@
+# Scrape targets that live in the Docker estate rather than the cluster.
+#
+# MUST carry `release: kps` — the operator's scrapeConfigSelector is
+# matchLabels{release: kps} and silently ignores anything without it. A missing
+# label here looks identical to "the target is down", so check the label first
+# when a ScrapeConfig appears to do nothing.
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: authentik
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  jobName: authentik
+  scrapeInterval: 60s
+  scrapeTimeout: 15s
+  staticConfigs:
+    # Via the hostNetwork relay in authentik-bridge.yaml — pods cannot route to
+    # Docker container IPs directly.
+    - targets: ["135.181.219.107:9302"]
+      labels:
+        service: authentik
+        container: authentik-server-1
+  metricRelabelings:
+    # Authentik emits ~2,660 series raw, of which ~1,700 are histogram buckets
+    # and 554 are per-license-field gauges. Dropping those leaves ~380 genuinely
+    # useful counters and gauges: request rates, login/flow outcomes, outpost
+    # health. _sum and _count survive, so latency averages still work.
+    - action: drop
+      sourceLabels: [__name__]
+      regex: '.*_bucket'
+    - action: drop
+      sourceLabels: [__name__]
+      regex: 'authentik_enterprise_license_expiry_seconds|python_gc_.*|django_migrations_.*'
