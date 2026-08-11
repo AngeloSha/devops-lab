@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 APP_VERSION = os.getenv("APP_VERSION", "dev")
-GREETING = os.getenv("GREETING", "hello")
+GREETING = os.getenv("GREETING", "hello there")
 
 # Readiness is mutable at runtime so Kubernetes probe behavior can be
 # demonstrated live: POST /toggle-ready and watch the pod leave the Service.
