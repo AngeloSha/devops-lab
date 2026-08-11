@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devops-lab-config
+data:
+  GREETING: "hello from k3s"
+  START_READY: "true"

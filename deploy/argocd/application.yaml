@@ -1,0 +1,21 @@
+# Bootstrap record: applied once with kubectl, after which Argo CD owns the app.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: devops-lab
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/AngeloSha/devops-lab.git
+    targetRevision: main
+    path: deploy/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: devops-lab
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

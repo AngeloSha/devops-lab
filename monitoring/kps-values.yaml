@@ -1,0 +1,70 @@
+# kube-prometheus-stack values, sized for a single-node K3s lab sharing a busy
+# host. Retention and resources are deliberately capped; storage lands on the
+# local-path provisioner (under /data/k3s/storage — NOT the nearly-full root fs).
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    retentionSize: 4GB
+    # Discover ServiceMonitors/PodMonitors cluster-wide, not only Helm-labeled ones
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 5Gi
+
+alertmanager:
+  enabled: false # future round: flip to true and add routes/receivers
+
+grafana:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    hosts:
+      - grafana.servershelf.com
+
+# K3s runs control-plane components in-process (and uses sqlite, not etcd),
+# so their dedicated scrape targets don't exist:
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
