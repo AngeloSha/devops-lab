@@ -6,9 +6,18 @@
 #
 # Why each flag exists (this host runs ~140 production containers):
 #
-#   --data-dir /data/k3s      The root filesystem is ~90% full. This moves
-#                             containerd images, the sqlite datastore AND
-#                             local-path PersistentVolumes onto /data (2.4 TB).
+#   DATA_DIR                  Where containerd images, the sqlite datastore and
+#                             local-path PersistentVolumes live. Default is the
+#                             k3s default under /var/lib/rancher, which on this
+#                             host is an NVMe mirror (~41 GB free after pruning
+#                             the Docker build cache). Do NOT move this to /data:
+#                             /data is a 15 TB spinning disk that sits at ~95%
+#                             utilisation serving the media stack, and a
+#                             Kubernetes datastore doing constant small writes
+#                             behind a 130 ms queue makes the whole control
+#                             plane sluggish. Space is worth less than latency
+#                             here, and the Prometheus retention caps in
+#                             monitoring/kps-values.yaml keep the footprint small.
 #   --disable servicelb       K3s's built-in ServiceLB (klipper) would bind
 #                             host ports 80/443 for Traefik and collide with
 #                             Nginx Proxy Manager. Traefik is instead pinned to
@@ -20,18 +29,19 @@
 #                             to start because of it.
 #
 # It does NOT reboot, does NOT restart Docker, and only ADDS firewall rules.
-# Uninstall at any time with: /usr/local/bin/k3s-uninstall.sh && rm -rf /data/k3s
+# Uninstall at any time with: /usr/local/bin/k3s-uninstall.sh
 
 set -euo pipefail
 
 LAB_USER=opencode
 NPM_GATEWAY=172.19.0.1        # gateway of the docker network NPM sits on
 TAILSCALE_IP=100.123.189.55
+DATA_DIR=/var/lib/rancher/k3s # NVMe. See the note above before changing this.
 
 echo "=============================================================="
 echo " 1/6  Pre-flight diagnostics (read-only)"
 echo "=============================================================="
-echo "--- disk ---"; df -h / /data
+echo "--- disk (DATA_DIR=${DATA_DIR}) ---"; df -h / /data
 echo "--- firewall ---"; ufw status verbose || true
 echo "--- ports that must be free (expect NO output) ---"
 ss -lntp | grep -E ':(6443|10250|30080|30443)\s' || echo "  6443/10250/30080/30443 all free — good"
@@ -50,8 +60,8 @@ echo
 echo "=============================================================="
 echo " 3/6  Stage Traefik NodePort config BEFORE install"
 echo "=============================================================="
-mkdir -p /data/k3s/server/manifests
-cat > /data/k3s/server/manifests/traefik-config.yaml <<'EOF'
+mkdir -p "${DATA_DIR}/server/manifests"
+cat > "${DATA_DIR}/server/manifests/traefik-config.yaml" <<'EOF'
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -61,20 +71,22 @@ spec:
   valuesContent: |-
     service:
       type: NodePort
+      spec:
+        type: NodePort
     ports:
       web:
         nodePort: 30080
       websecure:
         nodePort: 30443
 EOF
-echo "staged /data/k3s/server/manifests/traefik-config.yaml"
+echo "staged ${DATA_DIR}/server/manifests/traefik-config.yaml"
 
 echo
 echo "=============================================================="
 echo " 4/6  Install K3s server"
 echo "=============================================================="
 curl -sfL https://get.k3s.io | sh -s - server \
-  --data-dir /data/k3s \
+  --data-dir "${DATA_DIR}" \
   --disable servicelb \
   --write-kubeconfig-mode 600 \
   --kubelet-arg=fail-swap-on=false \

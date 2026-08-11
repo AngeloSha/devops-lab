@@ -21,9 +21,24 @@ hr() { echo; echo "=============================================================
 hr "Preconditions"
 kubectl cluster-info >/dev/null 2>&1 || { echo "ERROR: no cluster. Run scripts/install-k3s-root.sh as root first."; exit 1; }
 kubectl get nodes
+
+# On a fresh cluster Traefik arrives via a Helm install Job, which can take a
+# few minutes to pull. Wait for it rather than failing the run.
 echo
+echo -n "waiting for Traefik to be installed by its Helm job "
+for _ in $(seq 1 60); do
+  kubectl -n kube-system get svc traefik >/dev/null 2>&1 && break
+  echo -n "."
+  sleep 10
+done
+echo
+kubectl -n kube-system get svc traefik >/dev/null 2>&1 || {
+  echo "ERROR: Traefik never appeared. Check: kubectl -n kube-system get pods,jobs"
+  exit 1
+}
 echo "Traefik NodePorts:"
 kubectl -n kube-system get svc traefik -o jsonpath='{range .spec.ports[*]}  {.name}: {.port} -> nodePort {.nodePort}{"\n"}{end}'
+kubectl -n kube-system rollout status deploy/traefik --timeout=300s
 
 hr "Phase 4 — deploy the app (manual kubectl, pre-GitOps)"
 kubectl apply -k deploy/overlays/prod
